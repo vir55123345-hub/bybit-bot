@@ -9,7 +9,7 @@ import time
 import threading
 from datetime import datetime
 
-TELEGRAM_TOKEN = "8288068435:AAGMyUUlPZzvL5ffFnEJvdcYM1A4bIA4FLY"
+TELEGRAM_TOKEN = "8288068435:AAEN8PGNxU4JS0oqNAOcQxpa5AmgvGJ78pQ"
 TELEGRAM_ID    = "7495689566"
 
 UPPER_LEVEL  = 92
