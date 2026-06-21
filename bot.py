@@ -21,7 +21,7 @@ PEAK_MAX     = 98   # максимальный пик
 PEAK_LOOKBACK = 10  # за сколько свечей искать пик (10 свечей = 5 часов)
 ZONE_LOW     = 70   # нижняя граница зоны входа
 ZONE_HIGH    = 79   # верхняя граница зоны входа
-INTERVAL     = "30"
+INTERVAL     = "120"
 SLEEP_MIN    = 30
 CANDLES      = 200
 MAX_WORKERS  = 15
