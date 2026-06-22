@@ -1,6 +1,6 @@
 # ============================================
-# Bybit Bot — Пик (93-98%) → Откат → Лонг (70-79%)
-# + Информация о зонах ликвидаций
+# Bybit Bot — Финальная версия
+# Пик 93-98% → Откат 70-79% + EMA200 + 24ч рост
 # ============================================
 
 import requests
@@ -11,22 +11,21 @@ import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ⚠️ ВСТАВЬ СВОЙ ТОКЕН
-TELEGRAM_TOKEN = "8288068435:AAEN8PGNxU4JS0oqNAOcQxpa5AmgvGJ78pQ"
+TELEGRAM_TOKEN = "ВАШ_ТОКЕН_ЗДЕСЬ"
 TELEGRAM_ID    = "7495689566"
 
-# Настройки зон
-PEAK_MIN     = 93   # минимальный пик для фиксации
-PEAK_MAX     = 98   # максимальный пик
-PEAK_LOOKBACK = 10  # за сколько свечей искать пик (10 свечей = 5 часов)
-ZONE_LOW     = 70   # нижняя граница зоны входа
-ZONE_HIGH    = 79   # верхняя граница зоны входа
-INTERVAL     = "120"
-SLEEP_MIN    = 30
-CANDLES      = 200
-MAX_WORKERS  = 15
-# Порог близости ликвидаций к цене (в %)
-LIQ_PROXIMITY_PCT = 3.0
+PEAK_MIN      = 93
+PEAK_MAX      = 98
+PEAK_LOOKBACK = 6
+ZONE_LOW      = 70
+ZONE_HIGH     = 79
+EMA_PERIOD    = 200
+EMA_MIN_DIST  = 1.5
+EMA_MAX_DIST  = 12.0
+INTERVAL      = "30"
+SLEEP_MIN     = 30
+CANDLES       = 250
+MAX_WORKERS   = 15
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -60,7 +59,7 @@ def get_all_pairs():
 
 def get_candles(symbol):
     url = "https://api.bybit.com/v5/market/kline"
-    params = {"category":"linear", "symbol":symbol, "interval":INTERVAL, "limit":CANDLES}
+    params = {"category":"linear","symbol":symbol,"interval":INTERVAL,"limit":CANDLES}
     try:
         r = requests.get(url, params=params, headers=HEADERS, timeout=10)
         if r.status_code != 200: return None
@@ -73,54 +72,21 @@ def get_candles(symbol):
         return df.iloc[::-1].reset_index(drop=True)
     except: return None
 
-def get_liquidation_info(symbol, current_price):
-    # Получаем данные об открытом интересе и тикере
-    # для оценки зон вероятных ликвидаций
+def get_24h_change(symbol):
+    url = "https://api.bybit.com/v5/market/tickers"
+    params = {"category":"linear","symbol":symbol}
     try:
-        url = "https://api.bybit.com/v5/market/tickers"
-        r = requests.get(url, params={"category":"linear","symbol":symbol}, headers=HEADERS, timeout=10)
+        r = requests.get(url, params=params, headers=HEADERS, timeout=10)
         if r.status_code != 200: return None
         data = r.json()
         if data.get("retCode") != 0: return None
         item = data["result"]["list"][0]
-
-        high_24h = float(item.get("highPrice24h", 0))
-        low_24h  = float(item.get("lowPrice24h", 0))
-        oi       = float(item.get("openInterestValue", 0))
-        funding  = float(item.get("fundingRate", 0))
-
-        # Оцениваем зоны ликвидаций по High/Low 24ч
-        # Лонг-ликвидации обычно скапливаются ниже Low 24ч
-        # Шорт-ликвидации — выше High 24ч
-        liq_info = []
-
-        dist_to_high = abs(high_24h - current_price) / current_price * 100
-        dist_to_low  = abs(current_price - low_24h) / current_price * 100
-
-        if dist_to_high <= LIQ_PROXIMITY_PCT:
-            liq_info.append(f"⚠️ Шорт-ликвидации близко сверху (High 24ч: {high_24h}, расст. {round(dist_to_high,1)}%)")
-        else:
-            liq_info.append(f"✅ Шорт-ликвидации далеко (High 24ч: {high_24h}, расст. {round(dist_to_high,1)}%)")
-
-        if dist_to_low <= LIQ_PROXIMITY_PCT:
-            liq_info.append(f"⚠️ Лонг-ликвидации близко снизу (Low 24ч: {low_24h}, расст. {round(dist_to_low,1)}%)")
-        else:
-            liq_info.append(f"✅ Лонг-ликвидации далеко (Low 24ч: {low_24h}, расст. {round(dist_to_low,1)}%)")
-
-        oi_str = f"${round(oi/1_000_000,1)}M" if oi > 1_000_000 else f"${round(oi/1000)}K"
-        liq_info.append(f"📊 Открытый интерес: {oi_str}")
-
-        funding_pct = round(funding * 100, 4)
-        if funding > 0.0005:
-            liq_info.append(f"📡 Funding: {funding_pct}% (🔴 Лонги перегружены — риск слива)")
-        elif funding < -0.0005:
-            liq_info.append(f"📡 Funding: {funding_pct}% (🟢 Шорты перегружены — поддержка для лонга)")
-        else:
-            liq_info.append(f"📡 Funding: {funding_pct}% (⚪ Нейтрален)")
-
-        return "\n".join(liq_info)
-    except:
+        price24h = float(item.get("prevPrice24h", 0))
+        last = float(item.get("lastPrice", 0))
+        if price24h > 0:
+            return round((last - price24h) / price24h * 100, 2)
         return None
+    except: return None
 
 def calc_index_series(df):
     try:
@@ -136,8 +102,8 @@ def calc_index_series(df):
         pos_mf=mf.where(hlc3>hlc3.shift(1),0).rolling(n).sum()
         neg_mf=mf.where(hlc3<hlc3.shift(1),0).rolling(n).sum()
         mfi=100-(100/(1+pos_mf/neg_mf.replace(0,np.nan)))
-        idx=pd.Series(range(len(close)))
-        rosc=(close.rolling(n).corr(idx)+1)/2*100
+        idx_s=pd.Series(range(len(close)))
+        rosc=(close.rolling(n).corr(idx_s)+1)/2*100
         rank=close.rolling(100).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1]*100)
         ema12=close.ewm(span=12).mean(); ema26=close.ewm(span=26).mean()
         macd=ema12-ema26; sig=macd.ewm(span=9).mean()
@@ -145,47 +111,57 @@ def calc_index_series(df):
         macd_n=50+(diff/dmax.replace(0,np.nan))*50
         body=(close-df["open"]).abs(); rng=(high-low).replace(0,np.nan)
         jap=pd.Series(np.where(close>df["open"],body/rng*100,(1-body/rng)*100),index=close.index)
-        index=(rsi+stoch+rosc+wpr+rank+mfi+macd_n+jap)/8
-        return index
+        return (rsi+stoch+rosc+wpr+rank+mfi+macd_n+jap)/8
     except: return None
 
 def check_pair(symbol):
     df = get_candles(symbol)
-    if df is None or len(df) < 150: return None
-    index_series = calc_index_series(df)
-    if index_series is None or len(index_series) < PEAK_LOOKBACK + 2: return None
+    if df is None or len(df) < 210: return None
 
-    idx_current = round(index_series.iloc[-1], 2)
+    index_series = calc_index_series(df)
+    if index_series is None: return None
+
+    idx_current = round(index_series.iloc[-1], 1)
     price = df["close"].iloc[-1]
 
-    # Ищем пик 93-98% за последние PEAK_LOOKBACK свечей (исключая текущую)
-    recent_values = index_series.iloc[-(PEAK_LOOKBACK+1):-1]
-    peak_mask = (recent_values >= PEAK_MIN) & (recent_values <= PEAK_MAX)
+    if not (ZONE_LOW <= idx_current <= ZONE_HIGH): return None
 
-    if not peak_mask.any():
-        return None  # не было пика — сигнала нет
+    recent = index_series.iloc[-(PEAK_LOOKBACK+1):-1]
+    peak_mask = (recent >= PEAK_MIN) & (recent <= PEAK_MAX)
+    if not peak_mask.any(): return None
 
-    # Находим значение и позицию пика
-    peak_value = recent_values[peak_mask].max()
-    peak_pos = list(recent_values.values).index(recent_values[peak_mask].max())
-    candles_ago = PEAK_LOOKBACK - peak_pos
+    peak_value = recent[peak_mask].max()
+    peak_positions = recent[peak_mask].index.tolist()
+    last_peak_pos = peak_positions[-1]
+    candles_ago = len(df) - 1 - last_peak_pos
 
-    # Проверяем что СЕЙЧАС индекс в зоне 70-79% (откат произошёл)
-    in_zone = ZONE_LOW <= idx_current <= ZONE_HIGH
+    if idx_current >= peak_value: return None
 
-    if not in_zone:
-        return None
+    ema200 = df["close"].ewm(span=EMA_PERIOD, adjust=False).mean().iloc[-1]
+    if price <= ema200: return None
 
-    # Проверяем что текущее значение НИЖЕ пика (реальный откат)
-    if idx_current >= peak_value:
-        return None
+    ema_dist = (price - ema200) / ema200 * 100
+    if ema_dist < EMA_MIN_DIST or ema_dist > EMA_MAX_DIST: return None
+
+    if ema_dist < 3:
+        ema_label = "Слабый 🟡"
+    elif ema_dist < 7:
+        ema_label = "Хороший 🟢"
+    else:
+        ema_label = "Сильный 🟢"
+
+    change_24h = get_24h_change(symbol)
+    change_str = f"+{change_24h}%" if change_24h and change_24h > 0 else (f"{change_24h}%" if change_24h else "н/д")
 
     return {
         "symbol": symbol,
+        "price": price,
         "idx_current": idx_current,
-        "peak_value": round(peak_value, 2),
+        "peak_value": round(peak_value, 1),
         "candles_ago": candles_ago,
-        "price": price
+        "ema_dist": round(ema_dist, 1),
+        "ema_label": ema_label,
+        "change_24h": change_str,
     }
 
 def listen_commands():
@@ -206,23 +182,21 @@ def listen_commands():
                         f"⏱ Аптайм: {h}ч {m}мин\n"
                         f"🔄 Циклов: {bot_status['cycles_done']}\n"
                         f"📊 Пар: {bot_status['pairs_checked']}/{bot_status['total_pairs']}\n"
-                        f"🎯 Сигналов отправлено: {bot_status['signals_sent']}\n"
-                        f"🕐 Последняя проверка: {bot_status['last_check'] or 'ещё не было'}\n"
-                        f"📈 Пик: {PEAK_MIN}-{PEAK_MAX}% → Откат → Зона: {ZONE_LOW}-{ZONE_HIGH}%"
+                        f"🔥 Сигналов: {bot_status['signals_sent']}\n"
+                        f"🕐 Последняя проверка: {bot_status['last_check'] or 'ещё не было'}"
                     )
         except: time.sleep(5)
 
 def main():
     threading.Thread(target=listen_commands, daemon=True).start()
     send_telegram(
-        f"🤖 Бот запущен! (Стратегия: Пик → Откат → Лонг)\n"
-        f"📈 Ищу пик {PEAK_MIN}-{PEAK_MAX}% за последние {PEAK_LOOKBACK} свечей\n"
-        f"🟢 Сигнал когда откат в зону {ZONE_LOW}-{ZONE_HIGH}%\n"
-        f"💥 + анализ зон ликвидаций\n\n"
-        f"Напиши /status для проверки"
+        "🔥 Бот запущен!\n"
+        "Стратегия: Пик 93-98% → Откат 70-79% + EMA200\n"
+        "Таймфрейм: 30 минут\n\n"
+        "Напиши /status для проверки"
     )
 
-    alerted = {}  # symbol → последнее значение при сигнале
+    alerted = {}
 
     while True:
         now = datetime.now().strftime("%H:%M")
@@ -230,8 +204,7 @@ def main():
         print(f"[{now}] Проверяю пары...")
 
         pairs = get_all_pairs()
-        if not pairs:
-            time.sleep(120); continue
+        if not pairs: time.sleep(120); continue
         bot_status["total_pairs"] = len(pairs)
         print(f"Найдено пар: {len(pairs)}")
 
@@ -244,45 +217,26 @@ def main():
                 bot_status["pairs_checked"] = checked
                 if result is None: continue
 
-                symbol     = result["symbol"]
-                idx_curr   = result["idx_current"]
-                peak_val   = result["peak_value"]
-                candles_ago = result["candles_ago"]
-                price      = result["price"]
-
-                # Защита от дублей: не слать если уже был сигнал и индекс не выходил из зоны
+                symbol = result["symbol"]
                 prev = alerted.get(symbol, 100)
-                if prev <= ZONE_HIGH:
-                    continue  # уже были в зоне, ждём выхода
-
-                # Получаем информацию о ликвидациях
-                liq_info = get_liquidation_info(symbol, price)
-                liq_str = liq_info if liq_info else "Данные недоступны"
-
-                time_ago = candles_ago * 30  # в минутах
-                time_str = f"{time_ago} мин назад" if time_ago < 60 else f"{round(time_ago/60,1)} ч назад"
+                if prev <= ZONE_HIGH: continue
 
                 msg = (
-                    f"🟢 <b>СИГНАЛ НА ЛОНГ!</b>\n"
-                    f"📊 <b>{symbol}</b>\n"
-                    f"📈 Пик был: <b>{peak_val}%</b> ({time_str})\n"
-                    f"📉 Текущий индекс: <b>{idx_curr}%</b> (в зоне {ZONE_LOW}-{ZONE_HIGH}%)\n"
-                    f"💰 Цена входа: <b>{price}</b>\n"
-                    f"⏱ Таймфрейм: 30m\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"💥 <b>Зона ликвидаций:</b>\n{liq_str}\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"🎯 Логика: откат от перекупленности в зону поддержки"
+                    f"🔥 ТОП LONG SIGNAL\n\n"
+                    f"Монета: <b>{symbol}</b>\n\n"
+                    f"Рост за 24 часа: <b>{result['change_24h']}</b>\n\n"
+                    f"Пик индекса: <b>{result['peak_value']}%</b>\n"
+                    f"Текущий индекс: <b>{result['idx_current']}%</b>\n\n"
+                    f"Пик был: <b>{result['candles_ago']} свечи назад</b>\n\n"
+                    f"EMA200: <b>{result['ema_label']}</b>\n"
+                    f"Цена выше EMA200 на <b>{result['ema_dist']}%</b>\n\n"
+                    f"Текущая цена: <b>{result['price']}</b>\n\n"
+                    f"Таймфрейм: 30 минут"
                 )
                 send_telegram(msg)
                 bot_status["signals_sent"] += 1
-                alerted[symbol] = idx_curr
-                print(f"🟢 СИГНАЛ: {symbol} пик={peak_val}% текущий={idx_curr}%")
-
-        # Сброс алертов для пар которые вышли из зоны
-        for s in list(alerted.keys()):
-            if alerted[s] <= ZONE_HIGH:
-                pass  # оставляем пока в зоне
+                alerted[symbol] = result["idx_current"]
+                print(f"🔥 СИГНАЛ: {symbol} пик={result['peak_value']}% текущий={result['idx_current']}%")
 
         elapsed = round(time.time() - start, 1)
         bot_status["last_check"] = datetime.now().strftime("%H:%M:%S")
