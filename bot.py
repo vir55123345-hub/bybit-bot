@@ -11,7 +11,7 @@ import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-TELEGRAM_TOKEN = "ВАШ_ТОКЕН_ЗДЕСЬ"
+TELEGRAM_TOKEN = "8288068435:AAEN8PGNxU4JS0oqNAOcQxpa5AmgvGJ78pQ"
 TELEGRAM_ID    = "7495689566"
 
 PEAK_MIN      = 93
